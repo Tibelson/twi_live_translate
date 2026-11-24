@@ -30,6 +30,9 @@ GRIOT_FILES = [
 KASANOMA_TWI_ZIP = (
     "https://github.com/michsethowusu/kasanoma/releases/download/v1/kasanoma_model-twi.zip"
 )
+# The zip ships bare `model.onnx` / `model.onnx.json`. Rename to something
+# self-describing, and keep the `<model>.json` pairing Piper expects.
+KASANOMA_VOICE_STEM = "kasanoma-twi.onnx"
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -57,10 +60,16 @@ def fetch_kasanoma(dest: Path) -> None:
     print(f"{len(blob) / 1e6:.0f} MB")
     with zipfile.ZipFile(io.BytesIO(blob)) as archive:
         for member in archive.namelist():
-            if member.endswith((".onnx", ".json")) and not member.startswith("__"):
-                target = dest / Path(member).name
-                target.write_bytes(archive.read(member))
-                print(f"  extracted {target.name}")
+            if member.startswith("__"):
+                continue
+            if member.endswith(".onnx.json") or member.endswith(".json"):
+                target = dest / f"{KASANOMA_VOICE_STEM}.json"
+            elif member.endswith(".onnx"):
+                target = dest / KASANOMA_VOICE_STEM
+            else:
+                continue
+            target.write_bytes(archive.read(member))
+            print(f"  extracted {target.name}")
 
 
 def main() -> int:

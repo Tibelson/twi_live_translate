@@ -65,7 +65,7 @@ class TranslateConfig:
 class TtsConfig:
     twi_voice: Path = field(
         default_factory=lambda: ROOT
-        / os.getenv("TWI_PIPER_VOICE", "models/kasanoma-twi/kasanoma-twi-medium.onnx")
+        / os.getenv("TWI_PIPER_VOICE", "models/kasanoma-twi/kasanoma-twi.onnx")
     )
     # macOS `say` needs no setup and is adequate for English output.
     english_backend: str = os.getenv("TWI_EN_TTS", "system")

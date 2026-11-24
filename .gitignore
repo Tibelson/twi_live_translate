@@ -1,0 +1,7 @@
+.venv/
+models/griot-edge/
+models/kasanoma-twi/
+__pycache__/
+*.pyc
+.env
+recordings/

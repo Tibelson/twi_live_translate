@@ -1,0 +1,36 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "twi-interpreter"
+version = "0.1.0"
+description = "Two-way speech-to-speech interpreter for Asante Twi and English"
+requires-python = ">=3.11"
+dependencies = [
+    "anthropic>=2.13",
+    "numpy<2",            # Griot runtime requires numpy 1.x
+    "scipy>=1.11",
+    "sounddevice>=0.5",
+    "soundfile>=0.12",
+    "onnxruntime>=1.18",
+    # Maintained fork with prebuilt wheels; upstream webrtcvad 2.0.10 imports
+    # pkg_resources, which setuptools >= 81 no longer ships.
+    "webrtcvad-wheels>=2.0.14",
+    "huggingface-hub>=0.26",
+    "python-dotenv>=1.0",
+    "rich>=13.7",
+    "piper-tts>=1.8",
+]
+
+[project.optional-dependencies]
+# English ASR for the English->Twi direction. Separate extra because
+# ctranslate2 pins numpy differently than the Griot runtime.
+en-asr = ["faster-whisper>=1.2"]
+
+[project.scripts]
+twi-interpret = "interpreter.cli:main"
+twi-fetch-models = "scripts.fetch_models:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/interpreter"]

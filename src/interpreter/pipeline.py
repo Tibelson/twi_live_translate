@@ -28,13 +28,28 @@ class Turn:
     source: str
     target: str
     transcript: Transcript
-    interpretation: Interpretation
     audio_seconds: float
+    # None in ASR-only mode, where no translation is attempted.
+    interpretation: Interpretation | None = None
     tts_seconds: float = 0.0
+    # Peak sample level of the utterance, for setting microphone gain.
+    peak: float = 0.0
 
     @property
     def total_seconds(self) -> float:
-        return self.transcript.elapsed + self.interpretation.elapsed + self.tts_seconds
+        interpret = self.interpretation.elapsed if self.interpretation else 0.0
+        return self.transcript.elapsed + interpret + self.tts_seconds
+
+    @property
+    def realtime_factor(self) -> float:
+        """Recognition seconds per second of audio.
+
+        Below 1.0 means the recogniser finishes faster than the speech
+        arrives, which is the condition for keeping up in a live conversation.
+        """
+        if self.audio_seconds <= 0:
+            return 0.0
+        return self.transcript.elapsed / self.audio_seconds
 
 
 class Interpreter:
@@ -42,15 +57,22 @@ class Interpreter:
 
     def __init__(self, config: Config) -> None:
         self.config = config
-        self.translator = Translator(config.translate)
         self.speaker = Speaker(config.audio)
+        self._translator: Translator | None = None
         self._recognizers: dict[str, Recognizer] = {}
         self._synthesizers: dict[str, Synthesizer] = {}
         self._direction_lock = threading.Lock()
         self.source, self.target = self._parse_direction(config.direction)
         self._turn_index = 0
 
-    # -- lazily built backends, so a one-direction run loads one ASR model ---
+    # -- lazily built backends, so a one-direction run loads one ASR model,
+    #    and ASR-only mode builds no API client and no synthesiser at all ----
+
+    @property
+    def translator(self) -> Translator:
+        if self._translator is None:
+            self._translator = Translator(self.config.translate)
+        return self._translator
 
     def recognizer(self, language: str) -> Recognizer:
         if language not in self._recognizers:
@@ -97,42 +119,54 @@ class Interpreter:
 
     # -- the actual work ----------------------------------------------------
 
-    def handle(self, audio: np.ndarray, *, speak: bool = True) -> Turn:
+    def handle(
+        self, audio: np.ndarray, *, speak: bool = True, translate: bool = True
+    ) -> Turn:
         source, target = self.current_direction()
-        audio_seconds = len(audio) / self.config.audio.sample_rate
-
-        transcript = self.recognizer(source).transcribe(audio)
-        interpretation = self.translator.interpret(transcript.text, source, target)
-
         turn = Turn(
             source=source,
             target=target,
-            transcript=transcript,
-            interpretation=interpretation,
-            audio_seconds=audio_seconds,
+            transcript=self.recognizer(source).transcribe(audio),
+            audio_seconds=len(audio) / self.config.audio.sample_rate,
+            peak=float(np.max(np.abs(audio))) if audio.size else 0.0,
+        )
+
+        if not translate:
+            # ASR-only: no API call, no synthesis, no playback.
+            if self.config.save_audio is not None:
+                self._save(audio, turn.transcript, None)
+            return turn
+
+        turn.interpretation = self.translator.interpret(
+            turn.transcript.text, source, target
         )
         if self.config.save_audio is not None:
-            self._save(audio, transcript, interpretation)
+            self._save(audio, turn.transcript, turn.interpretation)
 
         if speak:
             # On a low-confidence turn, prompting the speaker to repeat is more
             # useful than reading out a guess the listener cannot trust.
-            if interpretation.needs_repeat:
+            if turn.interpretation.needs_repeat:
                 utterance = self.synthesizer(source).speak(REPEAT_PROMPT[source])
             else:
-                utterance = self.synthesizer(target).speak(interpretation.translation)
+                utterance = self.synthesizer(target).speak(turn.interpretation.translation)
             turn.tts_seconds = utterance.elapsed
             self.speaker.play(utterance.audio, utterance.sample_rate)
 
         return turn
 
     def _save(
-        self, audio: np.ndarray, transcript: Transcript, interpretation: Interpretation
+        self,
+        audio: np.ndarray,
+        transcript: Transcript,
+        interpretation: Interpretation | None,
     ) -> None:
         """Persist utterance audio plus its transcript.
 
         This is the seed corpus for fine-tuning: real conversational audio with
-        a reviewed reconstruction beside the raw recogniser output.
+        a reviewed reconstruction beside the raw recogniser output. In ASR-only
+        mode only the raw output exists, which is still the half that matters
+        for measuring and improving recognition.
         """
         import json
 
@@ -143,23 +177,24 @@ class Interpreter:
         self._turn_index += 1
         stem = f"{int(time.time())}_{self._turn_index:04d}"
         sf.write(directory / f"{stem}.wav", audio, self.config.audio.sample_rate)
-        (directory / f"{stem}.json").write_text(
-            json.dumps(
+        record: dict[str, object] = {
+            "raw_asr": transcript.text,
+            "language": transcript.language,
+        }
+        if interpretation is not None:
+            record.update(
                 {
-                    "raw_asr": transcript.text,
                     "repaired_source": interpretation.repaired_source,
                     "translation": interpretation.translation,
                     "confidence": interpretation.confidence,
                     "notes": interpretation.notes,
-                    "language": transcript.language,
-                },
-                ensure_ascii=False,
-                indent=2,
-            ),
-            encoding="utf-8",
+                }
+            )
+        (directory / f"{stem}.json").write_text(
+            json.dumps(record, ensure_ascii=False, indent=2), encoding="utf-8"
         )
 
-    def run(self, on_turn, on_segment_start=None) -> None:
+    def run(self, on_turn, on_segment_start=None, *, translate: bool = True) -> None:
         """Listen until interrupted, calling `on_turn(turn)` per utterance."""
         chunker = SegmentChunker(self.config.audio)
         with MicrophoneStream(self.config.audio) as microphone:
@@ -167,7 +202,7 @@ class Interpreter:
                 if on_segment_start is not None:
                     on_segment_start(len(segment) / self.config.audio.sample_rate)
                 try:
-                    on_turn(self.handle(segment))
+                    on_turn(self.handle(segment, translate=translate))
                 except Exception as exc:  # one bad turn must not end the session
                     print(f"[pipeline] {exc.__class__.__name__}: {exc}", file=sys.stderr)
 

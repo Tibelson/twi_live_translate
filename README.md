@@ -53,8 +53,9 @@ reading out a guess.
 uv venv --python 3.11 .venv
 uv pip install -e .                  # add '.[en-asr]' for the English->Twi direction
 python scripts/fetch_models.py       # ~300 MB: Griot ASR + Kasanoma Twi voice
-cp .env.example .env                 # then set ANTHROPIC_API_KEY (or run `ant auth login`)
 
+twi-interpret --asr-only             # local transcription, no API key needed
+cp .env.example .env                 # then set ANTHROPIC_API_KEY (or run `ant auth login`)
 twi-interpret                        # Twi in, English out
 twi-interpret --direction en-tw      # English in, Twi out
 twi-interpret --direction both       # press Enter to flip sides
@@ -65,12 +66,37 @@ Useful flags:
 
 | Flag | Effect |
 |---|---|
+| `--asr-only` | Transcribe locally and stop. No API call, no translation, no speech out. |
 | `--fast` | Turns off model thinking. Lower latency, some accuracy cost on garbled input. |
 | `--effort low\|medium\|high` | Repair/translation depth. Default `low`. |
 | `--lookahead 0` | Fully causal ASR — lowest latency, WER 0.374 instead of 0.349. |
 | `--glossary terms.txt` | Names and domain vocabulary, folded into the cached prompt. |
 | `--save-audio corpus/` | Writes each utterance plus its transcript — the seed for fine-tuning. |
 | `--list-devices` | Audio device indices for `--input-device` / `--output-device`. |
+
+## Local-only mode
+
+`--asr-only` runs mic → VAD → Twi ASR → printed text and nothing else. No
+network call, no API key, no spend. Run this first: it is where you tune
+microphone gain and segmentation, and where you find out what raw recognition
+quality actually looks like on your audio before paying to translate it.
+
+```
+Twi   2.1s  ▇▇▇▇▇▇▇·····  0.55   asr 0.42s   rtf 0.20
+  mepe se meko kumase kyena anopa
+```
+
+The two numbers that matter:
+
+- **peak level** (the bar) — warns when input is clipping or too quiet. Both
+  wreck accuracy, and both are invisible without a meter.
+- **rtf**, real-time factor — recognition seconds per second of audio. Below
+  1.00 means the recogniser finishes faster than speech arrives, which is the
+  condition for keeping up live. Above it, the warning suggests
+  `--lookahead 0` or more ASR threads.
+
+`--save-audio corpus/` works here too, and writes the raw transcript only, so
+you can collect and hand-correct a test set without spending anything.
 
 ## Design notes
 
@@ -100,9 +126,10 @@ recommended fallback model rather than returning nothing.
 
 ## Verification status
 
-`python scripts/selftest.py` runs 15 checks with no microphone, no models, and
+`python scripts/selftest.py` runs 23 checks with no microphone, no models, and
 no API key — VAD boundaries, request shape, prompt caching, schema strictness,
-and every failure path. All pass.
+every failure path, and that `--asr-only` never constructs an API client. All
+pass.
 
 **Not yet verified end to end:** the full mic → speaker loop, Griot weights
 loading (the 245 MB download was not performed here), the Kasanoma voice, and a
@@ -111,9 +138,10 @@ live API call. Run `scripts/fetch_models.py`, set a key, and try
 
 ## What to do next
 
-1. **Measure before improving.** `--save-audio` collects real conversational
-   audio with the raw ASR output beside a reviewed reconstruction. That corpus
-   is what tells you whether to spend effort on ASR or on TTS.
+1. **Measure before improving.** Start with `--asr-only --save-audio corpus/`,
+   which costs nothing: it collects real conversational audio with the raw ASR
+   output beside it. That corpus is what tells you whether to spend effort on
+   recognition or on translation.
 2. **Cheapest accuracy win: KenLM beam search.** The vendor reports WER 0.269
    with lookahead + KenLM beam versus 0.349 greedy. `ctc_decode.py` is already
    downloaded and `OnnxRuntime.transcribe` takes a `decoder` argument; it needs

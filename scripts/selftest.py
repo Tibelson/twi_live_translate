@@ -12,6 +12,8 @@ import os
 import sys
 import types
 
+import pathlib
+
 import numpy as np
 
 os.environ.setdefault("ANTHROPIC_API_KEY", "sk-ant-selftest-placeholder")
@@ -143,12 +145,61 @@ def test_degradation() -> None:
     check("api error marked low confidence", broken.needs_repeat and broken.degraded)
 
 
+def test_asr_only() -> None:
+    print("asr-only mode")
+    import json
+    import tempfile
+
+    from interpreter.asr.base import Transcript
+    from interpreter.config import Config
+    from interpreter.pipeline import Interpreter
+
+    class StubRecognizer:
+        language = "tw"
+
+        def transcribe(self, audio):  # noqa: ANN001
+            return Transcript("mepe se meko kumase", "tw", 0.4)
+
+    with tempfile.TemporaryDirectory() as workdir:
+        config = Config()
+        config.save_audio = workdir
+        interpreter = Interpreter(config)
+        interpreter._recognizers["tw"] = StubRecognizer()
+
+        audio = np.zeros(int(config.audio.sample_rate * 2.0), dtype=np.float32)
+        audio[:100] = 0.5
+        turn = interpreter.handle(audio, translate=False)
+
+        check("no translation attempted", turn.interpretation is None)
+        check(
+            "no API client constructed",
+            interpreter._translator is None,
+            "asr-only must never build one",
+        )
+        check("transcript present", turn.transcript.text.startswith("mepe"))
+        check("peak level captured", abs(turn.peak - 0.5) < 1e-6, f"{turn.peak:.2f}")
+        check(
+            "realtime factor computed",
+            abs(turn.realtime_factor - 0.2) < 0.01,
+            f"rtf {turn.realtime_factor:.2f}",
+        )
+
+        records = list(pathlib.Path(workdir).glob("*.json"))
+        check("utterance saved to corpus", len(records) == 1)
+        if records:
+            record = json.loads(records[0].read_text(encoding="utf-8"))
+            check("raw asr recorded", record.get("raw_asr", "").startswith("mepe"))
+            check("no translation fields written", "translation" not in record)
+
+
 def main() -> int:
     test_segmentation()
     print()
     test_translate_request()
     print()
     test_degradation()
+    print()
+    test_asr_only()
     print()
     if failures:
         print(f"{len(failures)} check(s) failed: {', '.join(failures)}")

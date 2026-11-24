@@ -16,6 +16,12 @@ from .pipeline import Interpreter, Turn, read_wav
 FLAGS = {"tw": "Twi", "en": "English"}
 CONFIDENCE_STYLE = {"high": "green", "medium": "yellow", "low": "red"}
 
+# Peak sample level below which the recogniser is being starved of signal, and
+# above which the input is clipping. Both wreck accuracy, and both are
+# invisible unless you show them.
+QUIET_PEAK = 0.05
+CLIPPING_PEAK = 0.98
+
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
@@ -29,6 +35,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="tw-en: speak Twi, hear English. both: press Enter to flip sides.",
     )
     parser.add_argument("--file", type=Path, help="interpret a wav file instead of the mic")
+    parser.add_argument(
+        "--asr-only",
+        action="store_true",
+        help="transcribe locally and stop: no API call, no translation, no speech out",
+    )
     parser.add_argument("--no-speak", action="store_true", help="text output only")
     parser.add_argument(
         "--fast",
@@ -77,7 +88,52 @@ def config_from_args(args: argparse.Namespace) -> Config:
     return config
 
 
+def level_meter(peak: float, width: int = 12) -> Text:
+    """Render peak level as a bar, coloured by whether it is usable."""
+    filled = min(width, int(round(peak * width)))
+    if peak >= CLIPPING_PEAK:
+        style = "red"
+    elif peak < QUIET_PEAK:
+        style = "yellow"
+    else:
+        style = "green"
+    return Text("▇" * filled + "·" * (width - filled), style=style)
+
+
+def render_asr_turn(console: Console, turn: Turn) -> None:
+    """Compact readout for ASR-only mode: levels, speed, raw text."""
+    line = Text()
+    line.append(f"{FLAGS[turn.source]}  ", style="bold cyan")
+    line.append(f"{turn.audio_seconds:4.1f}s  ", style="dim")
+    line.append(level_meter(turn.peak))
+    line.append(f" {turn.peak:.2f}", style="dim")
+    line.append(f"  asr {turn.transcript.elapsed:.2f}s", style="dim")
+    line.append(
+        f"  rtf {turn.realtime_factor:.2f}",
+        style="dim" if turn.realtime_factor < 1.0 else "red",
+    )
+    console.print(line)
+    console.print(Text(f"  {turn.transcript.text or '(nothing recognised)'}", style="white"))
+
+    if turn.peak >= CLIPPING_PEAK:
+        console.print(Text("  input clipping — lower the mic gain", style="red"))
+    elif turn.peak < QUIET_PEAK:
+        console.print(Text("  very quiet — raise the mic gain or move closer", style="yellow"))
+    if turn.realtime_factor >= 1.0:
+        console.print(
+            Text(
+                "  slower than real time — try --lookahead 0 or TWI_ASR_THREADS",
+                style="red",
+            )
+        )
+    console.print()
+
+
 def render_turn(console: Console, turn: Turn) -> None:
+    if turn.interpretation is None:
+        render_asr_turn(console, turn)
+        return
+
     interpretation = turn.interpretation
     style = CONFIDENCE_STYLE[interpretation.confidence]
 
@@ -134,26 +190,45 @@ def main() -> int:
         console.print(f"[red]{exc}[/red]")
         return 1
 
+    translate = not args.asr_only
+
     if args.file is not None:
         audio = read_wav(args.file, config.audio.sample_rate)
-        render_turn(console, interpreter.handle(audio, speak=not args.no_speak))
+        turn = interpreter.handle(
+            audio, speak=not (args.no_speak or args.asr_only), translate=translate
+        )
+        render_turn(console, turn)
         return 0
 
     source, target = interpreter.current_direction()
-    console.print(
-        Text(f"Interpreting {FLAGS[source]} -> {FLAGS[target]}.", style="bold")
-    )
-    if args.direction == "both":
-        console.print(Text("Press Enter to flip direction. Ctrl-C to stop.", style="dim"))
-        threading.Thread(
-            target=watch_for_flip, args=(interpreter, console), daemon=True
-        ).start()
+    if args.asr_only:
+        console.print(
+            Text(f"Transcribing {FLAGS[source]} locally. No API calls.", style="bold")
+        )
+        console.print(
+            Text(
+                "rtf below 1.00 means recognition keeps up with speech. "
+                "Ctrl-C to stop.",
+                style="dim",
+            )
+        )
     else:
-        console.print(Text("Speak when ready. Ctrl-C to stop.", style="dim"))
+        console.print(Text(f"Interpreting {FLAGS[source]} -> {FLAGS[target]}.", style="bold"))
+        if args.direction == "both":
+            console.print(
+                Text("Press Enter to flip direction. Ctrl-C to stop.", style="dim")
+            )
+            threading.Thread(
+                target=watch_for_flip, args=(interpreter, console), daemon=True
+            ).start()
+        else:
+            console.print(Text("Speak when ready. Ctrl-C to stop.", style="dim"))
     console.print()
 
     try:
-        interpreter.run(on_turn=lambda turn: render_turn(console, turn))
+        interpreter.run(
+            on_turn=lambda turn: render_turn(console, turn), translate=translate
+        )
     except KeyboardInterrupt:
         console.print("\n[dim]Stopped.[/dim]")
     return 0
